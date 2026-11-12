@@ -24,6 +24,7 @@ import csv
 import json
 import math
 import os
+import stat
 import statistics
 from collections import Counter, OrderedDict
 from typing import Any, Dict, List, Optional, Tuple
@@ -62,6 +63,25 @@ def _read_block_error(abs_path: str) -> Any:
         return None
 
 
+# Like Hermes' read_file, never read device, fd or process files: they can block
+# forever (/dev/zero, a FIFO) or leak process state (/proc/<pid>/environ).
+_REFUSED_ROOTS = ("/proc", "/dev")
+
+
+def _under_refused_root(path: str) -> bool:
+    """True if the path, or the file a symlink resolves to, is under /proc or /dev."""
+    candidates = [os.path.abspath(path)]
+    try:
+        candidates.append(os.path.realpath(path))
+    except (OSError, ValueError):
+        pass
+    return any(
+        candidate == root or candidate.startswith(root + "/")
+        for candidate in candidates
+        for root in _REFUSED_ROOTS
+    )
+
+
 def _resolve(path: Any) -> str:
     if not isinstance(path, str) or not path.strip():
         raise ValueError("No file path provided")
@@ -69,10 +89,19 @@ def _resolve(path: Any) -> str:
     blocked = _read_block_error(os.path.abspath(path))
     if blocked:
         raise ValueError(blocked)
-    if not os.path.exists(path):
-        raise ValueError(f"File not found: {path}")
-    if os.path.isdir(path):
+    # Both checks run before anything is opened; stat() does not open the file.
+    if _under_refused_root(path):
+        raise ValueError(f"Refusing to read {path}: device and /proc paths are not data files")
+    try:
+        mode = os.stat(path).st_mode
+    except FileNotFoundError:
+        raise ValueError(f"File not found: {path}") from None
+    except OSError as exc:
+        raise ValueError(f"Cannot access {path}: {exc.strerror or exc}") from None
+    if stat.S_ISDIR(mode):
         raise ValueError(f"Path is a directory, not a file: {path}")
+    if not stat.S_ISREG(mode):
+        raise ValueError(f"Refusing to read {path}: not a regular file")
     return path
 
 
@@ -326,7 +355,20 @@ def _profile_csv(path: str, delimiter: str, top_n: int, scan_cap: int) -> Dict[s
         try:
             header = next(reader)
         except StopIteration:
-            return {"ok": True, "format": "csv", "rows": 0, "columns": [], "notes": ["empty file"]}
+            # Same shape as a non-empty result so callers (data_validate) never KeyError.
+            return {
+                "ok": True,
+                "format": "csv",
+                "delimiter": "\\t" if delimiter == "\t" else delimiter,
+                "has_header": False,
+                "rows": 0,
+                "column_count": 0,
+                "duplicate_rows": 0,
+                "duplicate_row_examples": [],
+                "ragged_rows": [],
+                "columns": [],
+                "notes": [*notes, "empty file"],
+            }
         has_header = _looks_like_header(header)
         if has_header:
             names = [h.strip() or f"col{i}" for i, h in enumerate(header)]
@@ -587,6 +629,8 @@ def data_profile(args: Dict[str, Any], **_: Any) -> str:
         return _err(str(exc))
     except OSError as exc:
         return _err(f"Could not read file: {exc}")
+    except csv.Error as exc:
+        return _err(f"Could not parse CSV: {exc}")
     result["file"] = path
     return json.dumps(result)
 
@@ -648,6 +692,8 @@ def data_validate(args: Dict[str, Any], **_: Any) -> str:
         return _err(str(exc))
     except OSError as exc:
         return _err(f"Could not read file: {exc}")
+    except csv.Error as exc:
+        return _err(f"Could not parse CSV: {exc}")
 
     # Optional key-uniqueness check (second pass, bounded).
     if key:
@@ -710,7 +756,7 @@ def _check_key_unique(path: str, fmt: str, delim: str, key: str, scan_cap: int) 
                             dups.append(v)
                     else:
                         seen.add(v)
-    except OSError:
+    except (OSError, csv.Error):
         return None, {}
     if dups or missing:
         return False, {"kind": "key_not_unique", "key": key,
@@ -770,6 +816,8 @@ def data_head(args: Dict[str, Any], **_: Any) -> str:
                                "has_header": has_header, "columns": names, "rows": rows})
     except OSError as exc:
         return _err(f"Could not read file: {exc}")
+    except csv.Error as exc:
+        return _err(f"Could not parse CSV: {exc}")
 
 
 def _row_to_dict(names: List[str], values: List[str], cols_filter: Optional[List[str]]) -> Dict[str, Any]:

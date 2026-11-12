@@ -1,5 +1,5 @@
 name: dataprobe
-version: 1.0.0
+version: 1.0.1
 author: rodricksz4h5
 description: >-
   Exact, local structure and quality checks over large CSV/TSV and JSONL data

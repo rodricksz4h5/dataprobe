@@ -81,11 +81,15 @@ override.
   through the same check Core's `read_file` uses, so credential stores, internal
   caches and `.env` files are refused — dataprobe can't be used to read what the
   host protects.
+- **Regular files only.** Like Core's `read_file`, paths under `/proc` and `/dev`
+  (including symlinks that resolve there) are refused, and so is anything that
+  isn't a regular file — FIFOs, sockets and devices — before the file is opened.
 - **No network, no credentials, no telemetry, no background processes, no
   self-update. Standard library only** (`csv`, `json`, `statistics`).
 - A single call stops after 2,000,000 rows, truncates cells over 50,000 chars,
   and caps per-column distinct tracking at 10,000 — all flagged in the result —
-  so runtime and memory stay bounded.
+  so runtime and memory stay bounded. A CSV field longer than 200,000 characters
+  can't be parsed and returns an error instead.
 
 ## Install
 
